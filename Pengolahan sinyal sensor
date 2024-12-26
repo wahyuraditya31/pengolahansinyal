@@ -1,0 +1,253 @@
+import sys
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QVBoxLayout, QPushButton, QLabel, QSlider,
+    QComboBox, QWidget, QHBoxLayout, QLineEdit
+)
+from PyQt5.QtCore import Qt
+
+class SensorSignalApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Graphic Visualization of Sensor Signals")
+        self.setGeometry(100, 100, 1000, 800)
+
+        # Layout setup
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.layout = QVBoxLayout()
+        self.central_widget.setLayout(self.layout)
+
+        # Sensor selection
+        self.sensor_label = QLabel("Select Sensor")
+        self.layout.addWidget(self.sensor_label)
+        self.sensor_selector = QComboBox()
+        self.sensor_selector.addItems([
+            "Accelerometer", "HC-SR04", "DHT11", "INA219", "LIDAR"
+        ])
+        self.layout.addWidget(self.sensor_selector)
+
+        # Add a button to confirm the sensor selection
+        self.select_button = QPushButton("Select Sensor")
+        self.select_button.clicked.connect(self.update_sensor_data)
+        self.layout.addWidget(self.select_button)
+
+        # Input fields for model parameters (Amplitude and Frequency)
+        self.amplitude_label = QLabel("Amplitude:")
+        self.layout.addWidget(self.amplitude_label)
+        self.amplitude_input = QLineEdit(self)
+        self.layout.addWidget(self.amplitude_input)
+
+        self.frequency_label = QLabel("Frequency (Hz):")
+        self.layout.addWidget(self.frequency_label)
+        self.frequency_input = QLineEdit(self)
+        self.layout.addWidget(self.frequency_input)
+
+        # Buttons to select INA219 output
+        self.ina219_output_label = QLabel("Select INA219 Output")
+        self.layout.addWidget(self.ina219_output_label)
+        self.ina219_button_layout = QHBoxLayout()
+
+        self.ina219_power_button = QPushButton("Power")
+        self.ina219_power_button.clicked.connect(lambda: self.set_ina219_output("Power"))
+        self.ina219_button_layout.addWidget(self.ina219_power_button)
+
+        self.ina219_current_button = QPushButton("Current")
+        self.ina219_current_button.clicked.connect(lambda: self.set_ina219_output("Current"))
+        self.ina219_button_layout.addWidget(self.ina219_current_button)
+
+        self.ina219_voltage_button = QPushButton("Voltage")
+        self.ina219_voltage_button.clicked.connect(lambda: self.set_ina219_output("Voltage"))
+        self.ina219_button_layout.addWidget(self.ina219_voltage_button)
+
+        self.layout.addLayout(self.ina219_button_layout)
+
+        # Display mathematical model for the selected sensor
+        self.model_label = QLabel("Model:")
+        self.layout.addWidget(self.model_label)
+        
+        # Show the selected sensor's model
+        self.model_output = QLabel("Model: None")
+        self.layout.addWidget(self.model_output)
+
+        # Plot setup
+        self.figure, self.axs = plt.subplots(2, 2, figsize=(10, 6))
+        self.canvas = FigureCanvas(self.figure)
+        self.layout.addWidget(self.canvas)
+
+        # Initialize some data
+        self.time = np.linspace(0, 2, 1000)
+        self.sound_signal = np.sin(2 * np.pi * 10 * self.time)
+
+        # Initialize result_signal before calling update_noise_signal
+        self.result_signal = self.sound_signal
+
+        # Initialize noise signal (set to zero initially)
+        self.noise_signal = np.zeros_like(self.time)
+
+        # Default INA219 output
+        self.ina219_output = "Power"
+
+        # Show the model for selected sensor initially
+        self.update_sensor_data()
+
+        # Noise controls
+        self.noise_amplitude_label = QLabel("Noise Amplitude: 3.0")
+        self.layout.addWidget(self.noise_amplitude_label)
+        self.noise_amplitude_slider = QSlider(Qt.Horizontal)
+        self.noise_amplitude_slider.setMinimum(1)
+        self.noise_amplitude_slider.setMaximum(100)
+        self.noise_amplitude_slider.setValue(30)
+        self.noise_amplitude_slider.valueChanged.connect(self.update_noise_amplitude_label)
+        self.layout.addWidget(self.noise_amplitude_slider)
+
+        self.noise_frequency_label = QLabel("Noise Frequency (Hz): 5")
+        self.layout.addWidget(self.noise_frequency_label)
+        self.noise_frequency_slider = QSlider(Qt.Horizontal)
+        self.noise_frequency_slider.setMinimum(1)
+        self.noise_frequency_slider.setMaximum(50)
+        self.noise_frequency_slider.setValue(5)
+        self.noise_frequency_slider.valueChanged.connect(self.update_noise_frequency_label)
+        self.layout.addWidget(self.noise_frequency_slider)
+
+        # Signal operations
+        self.signal_operations_label = QLabel("Signal Operations")
+        self.layout.addWidget(self.signal_operations_label)
+        self.button_layout = QHBoxLayout()
+
+        self.add_button = QPushButton("Add")
+        self.add_button.clicked.connect(self.add_signals)
+        self.button_layout.addWidget(self.add_button)
+
+        self.multiply_button = QPushButton("Multiply")
+        self.multiply_button.clicked.connect(self.multiply_signals)
+        self.button_layout.addWidget(self.multiply_button)
+
+        self.convolve_button = QPushButton("Convolve")
+        self.convolve_button.clicked.connect(self.convolve_signals)
+        self.button_layout.addWidget(self.convolve_button)
+
+        self.dft_button = QPushButton("Calculate DFT")
+        self.dft_button.clicked.connect(self.calculate_dft)
+        self.button_layout.addWidget(self.dft_button)
+
+        self.layout.addLayout(self.button_layout)
+
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.clicked.connect(self.reset_signals)
+        self.layout.addWidget(self.reset_button)
+
+        # Initialize noise signal and plot
+        self.update_noise_signal()
+        self.plot_signals()
+
+    def update_sensor_data(self):
+        sensor = self.sensor_selector.currentText()
+        amplitude = float(self.amplitude_input.text() or 1.0)
+        frequency = float(self.frequency_input.text() or 5.0)
+
+        if sensor == "Accelerometer":
+            self.model_output.setText("Model: H(s) = 1 / (s^2 + 2*zeta*wn*s + wn^2)")
+            self.result_signal = amplitude * np.sin(2 * np.pi * frequency * self.time)
+        elif sensor == "HC-SR04":
+            self.model_output.setText("Model: amplitude * np.sin(2 * np.pi * frequency * time)")
+            self.result_signal = amplitude * np.sin(2 * np.pi * frequency * self.time)
+        elif sensor == "DHT11":
+            self.model_output.setText("Model: T = a*sin(2*pi*f*t) + b*cos(2*pi*f*t)")
+            temp_signal = amplitude * np.sin(2 * np.pi * frequency * self.time)
+            hum_signal = amplitude * np.cos(2 * np.pi * frequency * self.time)
+            self.result_signal = temp_signal + hum_signal
+        elif sensor == "INA219":
+            if self.ina219_output == "Power":
+                self.model_output.setText("Model: Power = Voltage * Current")
+                self.result_signal = (12 + 0.5 * np.sin(2 * np.pi * 0.1 * self.time)) * (1 + 0.2 * np.sin(2 * np.pi * 0.3 * self.time))
+            elif self.ina219_output == "Current":
+                self.model_output.setText("Model: Current = 1 + 0.2*sin(2*pi*0.3*t)")
+                self.result_signal = 1 + 0.2 * np.sin(2 * np.pi * 0.3 * self.time)
+            elif self.ina219_output == "Voltage":
+                self.model_output.setText("Model: Voltage = 12 + 0.5*sin(2*pi*0.1*t)")
+                self.result_signal = 12 + 0.5 * np.sin(2 * np.pi * 0.1 * self.time)
+        elif sensor == "LIDAR":
+            self.model_output.setText("Model: Doppler Shift = 2 * (Vrel / Wavelength)")
+            self.result_signal = 2 * (amplitude * frequency * self.time) / 0.000001  # Example Doppler shift model
+        else:
+            self.model_output.setText(f"Model: {sensor} - No model defined")
+            self.result_signal = self.sound_signal
+
+        self.plot_signals()
+
+    def set_ina219_output(self, output_type):
+        self.ina219_output = output_type
+        self.update_sensor_data()
+
+    def update_noise_amplitude_label(self):
+        self.noise_amplitude = self.noise_amplitude_slider.value() / 10
+        self.noise_amplitude_label.setText(f"Noise Amplitude: {self.noise_amplitude:.1f}")
+        self.update_noise_signal()
+
+    def update_noise_frequency_label(self):
+        self.noise_frequency = self.noise_frequency_slider.value()
+        self.noise_frequency_label.setText(f"Noise Frequency (Hz): {self.noise_frequency}")
+        self.update_noise_signal()
+
+    def update_noise_signal(self):
+        self.noise_amplitude = self.noise_amplitude_slider.value() / 10
+        self.noise_frequency = self.noise_frequency_slider.value()
+        self.noise_signal = self.noise_amplitude * np.sin(2 * np.pi * self.noise_frequency * self.time)
+        self.plot_signals()
+
+    def plot_signals(self):
+        self.axs[0, 0].cla()
+        self.axs[0, 0].plot(self.time, self.sound_signal, color='red')
+        self.axs[0, 0].set_title("Original Signal")
+        self.axs[0, 0].set_xlabel("Time [s]")
+        self.axs[0, 0].set_ylabel("Amplitude [V]")
+
+        self.axs[0, 1].cla()
+        self.axs[0, 1].plot(self.time, self.noise_signal, color='black')
+        self.axs[0, 1].set_title("Noise Signal")
+        self.axs[0, 1].set_xlabel("Time [s]")
+        self.axs[0, 1].set_ylabel("Amplitude [V]")
+
+        self.axs[1, 0].cla()
+        self.axs[1, 0].plot(self.time, self.result_signal, color='blue')
+        self.axs[1, 0].set_title("Result of Operation")
+        self.axs[1, 0].set_xlabel("Time [s]")
+        self.axs[1, 0].set_ylabel("Amplitude [V]")
+
+        self.axs[1, 1].cla()
+        self.axs[1, 1].magnitude_spectrum(self.result_signal, Fs=1/(self.time[1]-self.time[0]), color='yellow')
+        self.axs[1, 1].set_title("DFT Result")
+        self.axs[1, 1].set_xlabel("Frequency [Hz]")
+        self.axs[1, 1].set_ylabel("Amplitude")
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def add_signals(self):
+        self.result_signal = self.sound_signal + self.noise_signal
+        self.plot_signals()
+
+    def multiply_signals(self):
+        self.result_signal = self.sound_signal * self.noise_signal
+        self.plot_signals()
+
+    def convolve_signals(self):
+        self.result_signal = np.convolve(self.sound_signal, self.noise_signal, mode='same')
+        self.plot_signals()
+
+    def calculate_dft(self):
+        self.result_signal = np.abs(np.fft.fft(self.result_signal))
+        self.plot_signals()
+
+    def reset_signals(self):
+        self.result_signal = self.sound_signal
+        self.plot_signals()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = SensorSignalApp()
+    window.show()
+    sys.exit(app.exec_())
