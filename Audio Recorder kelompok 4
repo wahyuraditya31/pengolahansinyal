@@ -1,0 +1,333 @@
+import sys
+import os
+import time
+import requests
+import numpy as np
+import wavio
+import sounddevice as sd
+from PyQt5 import QtCore, QtWidgets
+import pyqtgraph as pg
+from scipy.io import wavfile
+import math
+
+# Fungsi untuk menghitung desibel dari tekanan suara
+def hitung_desibel(tekanan_suara, tekanan_referensi=20e-6):
+    """
+    Menghitung nilai desibel dari tekanan suara.
+
+    :param tekanan_suara: Tekanan suara yang diukur (dalam satuan Pascal)
+    :param tekanan_referensi: Tekanan suara referensi (default 20e-6 Pa)
+    :return: Nilai desibel (dB)
+    """
+    if tekanan_suara <= 0:
+        raise ValueError("Tekanan suara harus lebih besar dari 0.")
+    
+    # Menghitung nilai desibel menggunakan rumus 20 * log10(p / p0)
+    db = 20 * math.log10(tekanan_suara / tekanan_referensi)
+    return db
+
+# Fungsi untuk menghitung Total Harmonic Distortion (THD)
+def calculate_thd(fft_data, fundamental_freq_idx):
+    """
+    Menghitung Total Harmonic Distortion (THD).
+    
+    :param fft_data: Data hasil FFT (spectrum).
+    :param fundamental_freq_idx: Indeks dari frekuensi fundamental pada FFT.
+    :return: Nilai THD dalam persen.
+    """
+    # Menentukan amplitudo fundamental (frekuensi pertama)
+    A1 = np.abs(fft_data[fundamental_freq_idx])
+
+    # Menentukan amplitudo harmonik (frekuensi kedua dan seterusnya)
+    harmonic_amplitudes = []
+    for n in range(2, 10):  # Hanya ambil harmonik hingga ke-10
+        harmonic_idx = fundamental_freq_idx * n
+        if harmonic_idx < len(fft_data):
+            harmonic_amplitudes.append(np.abs(fft_data[harmonic_idx]))
+    
+    # Menghitung THD
+    if A1 == 0:
+        return 0  # Jika fundamental tidak ada, THD adalah 0
+    
+    harmonic_energy = np.sqrt(np.sum(np.array(harmonic_amplitudes)**2))
+    thd = (harmonic_energy / A1) * 100
+    return thd
+
+class EdgeImpulseUploader:
+    """Class to handle uploads to Edge Impulse."""
+    def __init__(self, api_key="ei_79111b68c08b6a7a3eeb0c565d179b227e0955cbce16bd18", 
+                 api_url="https://ingestion.edgeimpulse.com/api/training/files"):
+        self.api_key = api_key
+        self.api_url = api_url
+        self.label = "suara knalpot motor"  # Default label, can be changed dynamically
+
+    def upload_audio_to_edge_impulse(self, audio_filename):
+        try:
+            with open(audio_filename, "rb") as f:
+                response = requests.post(
+                    self.api_url,
+                    headers={
+                        "x-api-key": self.api_key,
+                        "x-label": self.label,
+                    },
+                    files={"data": (os.path.basename(audio_filename), f, "audio/wav")}, 
+                    timeout=30
+                )
+                if response.status_code == 200:
+                    return True, "Uploaded successfully!"
+                else:
+                    return False, f"Failed with status code: {response.status_code}, response: {response.text}"
+        except requests.exceptions.RequestException as e:
+            return False, f"Request failed: {e}"
+
+class Ui_MainWindow(object):
+    def setupUi(self, MainWindow):
+        MainWindow.setObjectName("MainWindow")
+        MainWindow.resize(800, 700)
+        self.centralwidget = QtWidgets.QWidget(MainWindow)
+
+        # Layout setup
+        self.gridLayout = QtWidgets.QGridLayout(self.centralwidget)
+
+        # Title Label
+        self.label_title = QtWidgets.QLabel(self.centralwidget)
+        self.label_title.setText("<h3 align='center'>Audio Recorder with Edge Impulse Integration</h3>")
+        self.gridLayout.addWidget(self.label_title, 0, 0, 1, 1)
+
+        # Group Box for Parameters
+        self.groupBox = QtWidgets.QGroupBox("Parameters", self.centralwidget)
+        self.gridLayout_parameters = QtWidgets.QGridLayout(self.groupBox)
+
+        # Input Fields
+        self.label_sampling_rate = QtWidgets.QLabel("Sampling Rate:")
+        self.lineEdit_sampling_rate = QtWidgets.QLineEdit("16000")
+        self.label_update_interval = QtWidgets.QLabel("Update Interval (ms):")
+        self.lineEdit_update_interval = QtWidgets.QLineEdit("50")
+        self.label_label = QtWidgets.QLabel("Label:")
+        self.label_db = QtWidgets.QLabel("Nilai Desibel: 0",)
+        font = self.label_db.font()
+        font.setPointSize(13)
+        self.label_db.setFont(font)
+        self.label_db.setAlignment(QtCore.Qt.AlignLeft)
+        self.lineEdit_label = QtWidgets.QLineEdit("recording")
+
+        # Frequency label for dominant frequency display
+        self.label_frequency = QtWidgets.QLabel("Dominant Frequency: 0 Hz", self.centralwidget)
+        font = self.label_frequency.font()
+        font.setPointSize(13)
+        self.label_frequency.setFont(font)
+        self.label_frequency.setAlignment(QtCore.Qt.AlignLeft)
+
+        # THD label for displaying the Total Harmonic Distortion
+        self.label_thd = QtWidgets.QLabel("THD: 0%", self.centralwidget)
+        font = self.label_thd.font()
+        font.setPointSize(13)
+        self.label_thd.setFont(font)
+        self.label_thd.setAlignment(QtCore.Qt.AlignLeft)
+
+        # Timer label for displaying the recording time
+        self.label_timer = QtWidgets.QLabel("00:00", self.centralwidget)
+        font = self.label_timer.font()
+        font.setPointSize(13)
+        self.label_timer.setFont(font)
+        self.label_timer.setAlignment(QtCore.Qt.AlignLeft)
+
+        # Buttons
+        self.pushButton_record = QtWidgets.QPushButton("Start Recording")
+        self.pushButton_replay = QtWidgets.QPushButton("Replay Audio")
+        self.pushButton_upload = QtWidgets.QPushButton("Upload to Edge Impulse")
+        self.pushButton_replay.setEnabled(False)
+        self.pushButton_upload.setEnabled(False)
+
+        # Layout for Parameters
+        self.gridLayout_parameters.addWidget(self.label_sampling_rate, 0, 0)
+        self.gridLayout_parameters.addWidget(self.lineEdit_sampling_rate, 0, 1)
+        self.gridLayout_parameters.addWidget(self.label_update_interval, 1, 0)
+        self.gridLayout_parameters.addWidget(self.lineEdit_update_interval, 1, 1)
+        self.gridLayout_parameters.addWidget(self.label_label, 2, 0)
+        self.gridLayout_parameters.addWidget(self.lineEdit_label, 2, 1)
+        self.gridLayout_parameters.addWidget(self.pushButton_record, 3, 0, 1, 2)
+        self.gridLayout_parameters.addWidget(self.pushButton_replay, 4, 0, 1, 2)
+        self.gridLayout_parameters.addWidget(self.pushButton_upload, 5, 0, 1, 2)
+        self.gridLayout_parameters.addWidget(self.label_db, 6, 0, 1, 2)
+        self.gridLayout_parameters.addWidget(self.label_frequency, 7, 0, 1, 2)  # Frequency display
+        self.gridLayout_parameters.addWidget(self.label_thd, 8, 0, 1, 2)  # THD display
+        self.gridLayout_parameters.addWidget(self.label_timer, 9, 0, 1, 2)  # Timer display
+        self.gridLayout.addWidget(self.groupBox, 1, 0, 1, 1)
+
+        # Plot Widgets for Time and Frequency Domain
+        self.plot_widget_time = pg.PlotWidget(self.centralwidget)
+        self.plot_widget_time.setBackground('k')
+        self.plot_widget_time.setTitle("Time Domain Signal")
+        self.plot_widget_time.showGrid(x=True, y=True)
+        self.gridLayout.addWidget(self.plot_widget_time, 2, 0, 1, 1)
+
+        self.plot_widget_freq = pg.PlotWidget(self.centralwidget)
+        self.plot_widget_freq.setBackground('k')
+        self.plot_widget_freq.setTitle("Frequency Domain (DFT)")
+        self.plot_widget_freq.showGrid(x=True, y=True)
+        self.gridLayout.addWidget(self.plot_widget_freq, 3, 0, 1, 1)
+
+        # Tabel untuk FFT Data
+        self.table_widget = QtWidgets.QTableWidget(self.centralwidget)
+        self.table_widget.setRowCount(10)  # Display 10 rows of data
+        self.table_widget.setColumnCount(2)  # Frequency and Amplitude
+        self.table_widget.setHorizontalHeaderLabels(["Frequency (Hz)", "Amplitude"])
+        self.gridLayout.addWidget(self.table_widget, 4, 0, 1, 1)
+
+        # Initialize plot data
+        self.plot_data_time = self.plot_widget_time.plot(pen=pg.mkPen(color='green', width=1))
+        self.plot_data_freq = self.plot_widget_freq.plot(pen=pg.mkPen(color='red', width=1))
+
+        MainWindow.setCentralWidget(self.centralwidget)
+
+        # Initialize parameters
+        self.is_recording = False
+        self.audio_data = []
+        self.audio_file_path = "recorded_audio.wav"
+        self.uploader = EdgeImpulseUploader(api_key="ei_79111b68c08b6a7a3eeb0c565d179b227e0955cbce16bd18")
+
+        # Timer for real-time updates
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update_plot)
+
+        # Connect buttons to functions
+        self.pushButton_record.clicked.connect(self.toggle_recording)
+        self.pushButton_replay.clicked.connect(self.replay_audio)
+        self.pushButton_upload.clicked.connect(self.upload_to_edge_impulse)
+
+    def validate_inputs(self):
+        try:
+            sampling_rate = int(self.lineEdit_sampling_rate.text())
+            if sampling_rate <= 0:
+                raise ValueError("Sampling rate must be a positive integer.")
+            update_interval = int(self.lineEdit_update_interval.text())
+            if update_interval <= 0:
+                raise ValueError("Update interval must be a positive integer.")
+            return True
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(None, "Input Error", f"Invalid input: {str(e)}")
+            return False
+
+    def toggle_recording(self):
+        if not self.is_recording:
+            if not self.validate_inputs():
+                return
+            self.is_recording = True
+            self.pushButton_record.setText("Stop Recording")
+            self.start_recording()
+        else:
+            self.is_recording = False
+            self.pushButton_record.setText("Start Recording")
+            self.stop_recording()
+
+    def start_recording(self):
+        self.sampling_rate = int(self.lineEdit_sampling_rate.text())
+        self.audio_data = []
+        self.recording_start_time = time.time()  # Track the start time for the recording
+        try:
+            self.stream = sd.InputStream(callback=self.audio_callback, channels=1, samplerate=self.sampling_rate)
+            self.stream.start()
+            self.timer.start(int(self.lineEdit_update_interval.text()))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(None, "Error", f"Failed to start recording: {e}")
+            self.is_recording = False
+            self.pushButton_record.setText("Start Recording")
+
+    def stop_recording(self):
+        if hasattr(self, 'stream') and self.stream:
+            self.stream.stop()
+            self.stream.close()
+        self.timer.stop()
+        self.save_audio()
+        self.pushButton_replay.setEnabled(True)
+        self.pushButton_upload.setEnabled(True)
+
+    def save_audio(self):
+        if self.audio_data:
+            audio_data_np = np.concatenate(self.audio_data)
+            wavio.write(self.audio_file_path, audio_data_np, self.sampling_rate, sampwidth=2)
+            self.pushButton_replay.setEnabled(True)
+            self.pushButton_upload.setEnabled(True)
+
+    def replay_audio(self):
+        if os.path.exists(self.audio_file_path):
+            _, data = wavfile.read(self.audio_file_path)
+            sd.play(data, self.sampling_rate)
+
+    def audio_callback(self, indata, frames, time, status):
+        if status:
+            print(status)
+        self.audio_data.append(indata.copy())
+        self.update_db_value(indata)
+        self.update_frequency(indata)
+
+    def update_db_value(self, indata):
+        rms_value = np.sqrt(np.mean(indata**2))
+        if rms_value > 0:
+            db_value = hitung_desibel(rms_value)
+            self.label_db.setText(f"dB: {db_value:.2f}")
+
+    def update_frequency(self, indata):
+        audio_array = np.concatenate(self.audio_data)
+        fft_data = np.fft.fft(audio_array[:, 0])
+        freqs = np.fft.fftfreq(len(fft_data), 1/self.sampling_rate)
+        
+        # Find the dominant frequency
+        dominant_freq_index = np.argmax(np.abs(fft_data))
+        dominant_freq = abs(freqs[dominant_freq_index])
+        
+        # Display the dominant frequency
+        self.label_frequency.setText(f"Dominant Frequency: {dominant_freq:.2f} Hz")
+        
+        # Calculate THD
+        thd = calculate_thd(fft_data, dominant_freq_index)
+        self.label_thd.setText(f"THD: {thd:.2f}%")
+        
+        # Update the FFT table
+        self.update_fft_table(freqs, np.abs(fft_data))
+
+    def update_fft_table(self, freqs, amplitudes):
+        """Update the table with frequency and amplitude data."""        
+        for i in range(min(10, len(freqs))):  # Display only first 10 frequencies
+            self.table_widget.setItem(i, 0, QtWidgets.QTableWidgetItem(f"{freqs[i]:.2f}"))
+            self.table_widget.setItem(i, 1, QtWidgets.QTableWidgetItem(f"{amplitudes[i]:.2f}"))
+
+    def update_plot(self):
+        if self.audio_data:
+            # Time domain plot update
+            self.plot_data_time.setData(np.concatenate(self.audio_data)[:, 0])
+
+            # Frequency domain (DFT) plot update
+            audio_array = np.concatenate(self.audio_data)
+            fft_data = np.fft.fft(audio_array[:, 0])
+            freqs = np.fft.fftfreq(len(fft_data), 1/self.sampling_rate)
+            self.plot_data_freq.setData(freqs[:len(freqs)//2], np.abs(fft_data[:len(fft_data)//2]))
+
+            # Update the timer display
+            elapsed_time = time.time() - self.recording_start_time
+            minutes = int(elapsed_time // 60)
+            seconds = int(elapsed_time % 60)
+            self.label_timer.setText(f"{minutes:02d}:{seconds:02d}")
+
+    def upload_to_edge_impulse(self):
+        label = self.lineEdit_label.text()
+        if not label:
+            QtWidgets.QMessageBox.warning(None, "Error", "Label cannot be empty!")
+            return
+        self.uploader.label = label
+        success, message = self.uploader.upload_audio_to_edge_impulse(self.audio_file_path)
+        if success:      
+            QtWidgets.QMessageBox.information(None, "Success", message)
+        else:
+            QtWidgets.QMessageBox.warning(None, "Error", message)
+
+
+# Run the application
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    MainWindow = QtWidgets.QMainWindow()
+    ui = Ui_MainWindow()
+    ui.setupUi(MainWindow)
+    MainWindow.show()
+    sys.exit(app.exec_())
